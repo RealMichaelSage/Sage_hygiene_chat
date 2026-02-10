@@ -60,9 +60,29 @@ async def delete_service_message(message: Message) -> None:
 # ---------------------------------------------------------------------------
 
 
+
+async def start_web_server() -> None:
+    from aiohttp import web
+    
+    async def handle(request):
+        return web.Response(text="OK")
+
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+    await site.start()
+    logger.info(f"Web server started on port {os.getenv('PORT', 8080)}")
+
+
 async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     logger.info("Bot is starting…")
+    
+    # Start the dummy web server
+    await start_web_server()
+    
     await dp.start_polling(bot)
 
 
