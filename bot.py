@@ -36,7 +36,17 @@ dp.include_router(router)
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.content_type.in_({ContentType.NEW_CHAT_MEMBERS, ContentType.LEFT_CHAT_MEMBER}))
+@router.message(F.content_type.in_({
+    ContentType.NEW_CHAT_MEMBERS,
+    ContentType.LEFT_CHAT_MEMBER,
+    ContentType.NEW_CHAT_TITLE,
+    ContentType.NEW_CHAT_PHOTO,
+    ContentType.DELETE_CHAT_PHOTO,
+    ContentType.PINNED_MESSAGE,
+    ContentType.VIDEO_CHAT_STARTED,
+    ContentType.VIDEO_CHAT_ENDED,
+    ContentType.VIDEO_CHAT_PARTICIPANTS_INVITED,
+}))
 async def delete_service_message(message: Message) -> None:
     """Delete join / leave service messages to keep the chat clean."""
     try:
