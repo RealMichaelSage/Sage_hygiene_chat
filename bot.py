@@ -336,6 +336,7 @@ async def run_agy_prompt(project_path: str, prompt: str, conversation_id: str = 
         process = await asyncio.create_subprocess_exec(
             *args,
             cwd=project_path,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env
