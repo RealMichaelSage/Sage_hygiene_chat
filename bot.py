@@ -250,6 +250,60 @@ def get_slug(name: str) -> str:
     name = re.sub(r'-+', '-', name).strip('-')
     return name
 
+def markdown_to_html(text: str) -> str:
+    # 1. Escape HTML special characters
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    # 2. Code blocks: ```language ... ``` -> <pre>...</pre>
+    code_blocks = []
+    def save_code_block(match):
+        code = match.group(2)
+        code_blocks.append(code)
+        return f"__CODE_BLOCK_{len(code_blocks)-1}__"
+    
+    text = re.sub(r"```(\w*)\n(.*?)\n```", save_code_block, text, flags=re.DOTALL)
+    
+    # 3. Inline code: `code` -> <code>code</code>
+    inline_codes = []
+    def save_inline_code(match):
+        code = match.group(1)
+        inline_codes.append(code)
+        return f"__INLINE_CODE_{len(inline_codes)-1}__"
+    text = re.sub(r"`([^`\n]+)`", save_inline_code, text)
+    
+    # 4. Bold: **text** -> <b>text</b>
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
+    
+    # 5. Italic: *text* or _text_ -> <i>text</i>
+    text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"<i>\1</i>", text)
+    
+    # 6. Process lines for lists and single asterisk italics
+    lines = []
+    for line in text.splitlines():
+        if line.strip().startswith("* ") or line.strip().startswith("- "):
+            prefix = "• "
+            rest = line.strip()[2:]
+            rest = re.sub(r"\*([^*]+)\*", r"<i>\1</i>", rest)
+            lines.append(prefix + rest)
+        else:
+            line = re.sub(r"\*([^*]+)\*", r"<i>\1</i>", line)
+            lines.append(line)
+    text = "\n".join(lines)
+    
+    # 7. Headings: ### Title -> <b>Title</b>
+    text = re.sub(r"^(#{1,6})\s*(.*?)$", r"<b>\2</b>", text, flags=re.MULTILINE)
+    
+    # 8. Links: [text](url) -> <a href="url">text</a>
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+    
+    # Restore code blocks and inline code
+    for i, code in enumerate(code_blocks):
+        text = text.replace(f"__CODE_BLOCK_{i}__", f"<pre>{code}</pre>")
+    for i, code in enumerate(inline_codes):
+        text = text.replace(f"__INLINE_CODE_{i}__", f"<code>{code}</code>")
+        
+    return text
+
 # ---------------------------------------------------------------------------
 # Dispatcher & Routers
 # ---------------------------------------------------------------------------
@@ -810,11 +864,12 @@ async def process_voice_task(message: Message) -> None:
             stop_event.set()
             await typing_task
             
-            if len(result) > 4000:
-                for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
-                    await message.reply(chunk)
+            html_result = markdown_to_html(result)
+            if len(html_result) > 4000:
+                for chunk in [html_result[i:i+4000] for i in range(0, len(html_result), 4000)]:
+                    await message.reply(chunk, parse_mode="HTML")
             else:
-                await message.reply(result)
+                await message.reply(html_result, parse_mode="HTML")
         else:
             stop_event.set()
             await typing_task
@@ -902,11 +957,12 @@ async def process_text_message(message: Message) -> None:
         stop_event.set()
         await typing_task
         
-    if len(result) > 4000:
-        for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
-            await message.reply(chunk)
+    html_result = markdown_to_html(result)
+    if len(html_result) > 4000:
+        for chunk in [html_result[i:i+4000] for i in range(0, len(html_result), 4000)]:
+            await message.reply(chunk, parse_mode="HTML")
     else:
-        await message.reply(result)
+        await message.reply(html_result, parse_mode="HTML")
 
 # ---------------------------------------------------------------------------
 # Entry point
