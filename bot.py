@@ -400,7 +400,7 @@ async def sync_tasks_to_crm(message: Message, date_str: str, projects: dict) -> 
                                     task_url = f"https://bitrix24.aisage.ru/company/personal/user/1/tasks/task/view/{task_id}/"
                                     project_report.append(f"{idx}. {status_icon} <a href='{task_url}'>{task_text}</a> — <b>{status_text}</b>")
                             else:
-                                project_report.append(f"{idx}. ❌ {task_text} — <b>Ошибка</b>: {data.get('message')}")
+                                project_report.append(f"{idx}. {status_icon} {task_text} — <b>Ошибка</b>: {data.get('message')}")
                         else:
                             project_report.append(f"{idx}. ❌ {task_text} — <b>Ошибка сервера</b> ({resp.status})")
                 except Exception as exc:
@@ -416,6 +416,17 @@ async def sync_tasks_to_crm(message: Message, date_str: str, projects: dict) -> 
             await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
     else:
         await message.answer(report_message, parse_mode="HTML", disable_web_page_preview=True)
+
+async def keep_typing(bot: Bot, chat_id: int, thread_id: int, stop_event: asyncio.Event):
+    while not stop_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=thread_id)
+        except Exception:
+            pass
+        try:
+            await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            break
 
 # ---------------------------------------------------------------------------
 # Handlers
@@ -521,7 +532,10 @@ async def archive_command(message: Message) -> None:
         return
         
     proj_name, proj_path, _, _ = project
-    status_msg = await message.reply(f"📦 Начинаю архивацию проекта <b>{proj_name}</b>...")
+    
+    # Show typing indicator
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(message.bot, message.chat.id, thread_id, stop_event))
     
     try:
         git_pushed = False
@@ -534,7 +548,6 @@ async def archive_command(message: Message) -> None:
             )
             stdout, _ = await proc_check.communicate()
             if b"origin" in stdout:
-                await status_msg.edit_text(f"📦 Архивация <b>{proj_name}</b>: Делаю git push...")
                 proc_push = await asyncio.create_subprocess_exec(
                     "git", "push", "-u", "origin", "main",
                     cwd=proj_path,
@@ -549,21 +562,24 @@ async def archive_command(message: Message) -> None:
         os.makedirs(archive_dir, exist_ok=True)
         zip_path = os.path.join(archive_dir, f"{get_slug(proj_name)}_{datetime.date.today().strftime('%Y%m%d')}")
         
-        await status_msg.edit_text(f"📦 Архивация <b>{proj_name}</b>: Создаю ZIP-архив...")
         shutil.make_archive(zip_path, 'zip', proj_path)
-        
-        await status_msg.edit_text(f"📦 Архивация <b>{proj_name}</b>: Удаляю рабочую папку с VPS...")
         shutil.rmtree(proj_path)
         
         await archive_project_in_db(thread_id)
         
         git_note = " (изменения запушены в GitHub)" if git_pushed else ""
-        await status_msg.edit_text(f"✅ <b>Проект {proj_name} успешно архивирован!</b>\n\n"
-                                    f"📁 Архив сохранен: <code>{zip_path}.zip</code>{git_note}.\n"
-                                    f"Рабочая директория очищена.", parse_mode="HTML")
+        
+        stop_event.set()
+        await typing_task
+        
+        await message.reply(f"✅ <b>Проект {proj_name} успешно архивирован!</b>\n\n"
+                            f"• Архив сохранен: <code>{zip_path}.zip</code>{git_note}.\n"
+                            f"• Рабочая директория очищена.", parse_mode="HTML")
     except Exception as e:
         logger.error("Archive failed: %s", e)
-        await status_msg.edit_text(f"❌ Ошибка архивации проекта: {e}")
+        stop_event.set()
+        await typing_task
+        await message.reply(f"❌ Ошибка архивации проекта: {e}")
 
 @task_router.message(F.text.startswith("/link_project"))
 async def link_project_command(message: Message) -> None:
@@ -697,6 +713,11 @@ async def process_voice_task(message: Message) -> None:
 
     logger.info("Processing voice message from Михаил Пузырёв...")
     
+    # Show typing indicator
+    thread_id = message.message_thread_id
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(message.bot, message.chat.id, thread_id, stop_event))
+    
     temp_filename = f"temp_{message.voice.file_id}.ogg"
     try:
         voice = message.voice
@@ -710,6 +731,8 @@ async def process_voice_task(message: Message) -> None:
         
     except Exception as e:
         logger.error("Failed to download or read voice file: %s", e)
+        stop_event.set()
+        await typing_task
         await message.reply(f"❌ Ошибка при скачивании голосового сообщения: {e}")
         return
     finally:
@@ -721,11 +744,11 @@ async def process_voice_task(message: Message) -> None:
 
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GLOBAL_GEMINI_API_KEY")
     if not gemini_key:
+        stop_event.set()
+        await typing_task
         await message.reply("❌ Ошибка: В настройках не найден API ключ Gemini.")
         return
         
-    status_msg = await message.reply("⏳ Распознаю голосовое сообщение...")
-    
     transcription = ""
     try:
         async with aiohttp.ClientSession() as session:
@@ -745,44 +768,55 @@ async def process_voice_task(message: Message) -> None:
                         transcription = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                     except KeyError:
                         logger.error("Invalid Gemini API response structure: %s", data)
-                        await status_msg.edit_text("❌ Не удалось разобрать ответ от Gemini API.")
+                        stop_event.set()
+                        await typing_task
+                        await message.reply("❌ Не удалось разобрать ответ от Gemini API.")
                         return
                 else:
                     err_text = await resp.text()
                     logger.error("Gemini API error (status=%s): %s", resp.status, err_text)
-                    await status_msg.edit_text(f"❌ Ошибка от Gemini API (код {resp.status})")
+                    stop_event.set()
+                    await typing_task
+                    await message.reply(f"❌ Ошибка от Gemini API (код {resp.status})")
                     return
     except Exception as e:
         logger.error("Failed to contact Gemini API: %s", e)
-        await status_msg.edit_text(f"❌ Сетевая ошибка при отправке в Gemini: {e}")
+        stop_event.set()
+        await typing_task
+        await message.reply(f"❌ Сетевая ошибка при отправке в Gemini: {e}")
         return
 
     if not transcription:
-        await status_msg.edit_text("⚠️ Голосовое сообщение пустое или не распознано.")
+        stop_event.set()
+        await typing_task
+        await message.reply("⚠️ Голосовое сообщение пустое или не распознано.")
         return
         
-    await status_msg.edit_text(f"📝 <b>Распознанный текст:</b>\n\n{transcription}", parse_mode="HTML")
+    # Send transcription first
+    await message.reply(f"📝 <b>Распознанный текст:</b>\n\n{transcription}", parse_mode="HTML")
     
     date_str, projects = parse_task_list(transcription)
     if projects:
+        stop_event.set()
+        await typing_task
         await sync_tasks_to_crm(message, date_str, projects)
     else:
-        thread_id = message.message_thread_id
         project = await get_project_by_thread(thread_id)
         if project:
             proj_name, proj_path, _, conv_id = project
-            progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта <b>{proj_name}</b>...", parse_mode="HTML")
             result = await run_agy_prompt(proj_path, transcription, conv_id)
+            
+            stop_event.set()
+            await typing_task
+            
             if len(result) > 4000:
                 for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
                     await message.reply(chunk)
             else:
                 await message.reply(result)
-            try:
-                await progress_msg.delete()
-            except Exception:
-                pass
         else:
+            stop_event.set()
+            await typing_task
             await message.reply("💡 Голосовое сообщение распознано, но эта тема не привязана ни к одному проекту. Создайте тему с префиксом <code>Проект: [Название]</code> или введите <code>/link_project [slug]</code> для привязки.", parse_mode="HTML")
 
 @task_router.message(F.content_type == ContentType.DOCUMENT)
@@ -803,15 +837,13 @@ async def process_document(message: Message) -> None:
     os.makedirs(docs_dir, exist_ok=True)
     dest_path = os.path.join(docs_dir, filename)
     
-    status_msg = await message.reply(f"⏳ Скачиваю файл <code>{filename}</code> в папку docs проекта...", parse_mode="HTML")
-    
     try:
         file_info = await message.bot.get_file(doc.file_id)
         await message.bot.download_file(file_info.file_path, dest_path)
-        await status_msg.edit_text(f"📥 Файл <code>{filename}</code> успешно сохранен в docs проекта <b>{proj_name}</b>.", parse_mode="HTML")
+        await message.reply(f"📥 Файл <code>{filename}</code> успешно сохранен в docs проекта <b>{proj_name}</b>.", parse_mode="HTML")
     except Exception as e:
         logger.error("Failed to download document: %s", e)
-        await status_msg.edit_text(f"❌ Ошибка при скачивании файла: {e}")
+        await message.reply(f"❌ Ошибка при скачивании файла: {e}")
 
 @task_router.message(F.content_type == ContentType.PHOTO)
 async def process_photo(message: Message) -> None:
@@ -831,15 +863,13 @@ async def process_photo(message: Message) -> None:
     os.makedirs(docs_dir, exist_ok=True)
     dest_path = os.path.join(docs_dir, filename)
     
-    status_msg = await message.reply("⏳ Скачиваю изображение в папку docs...")
-    
     try:
         file_info = await message.bot.get_file(photo.file_id)
         await message.bot.download_file(file_info.file_path, dest_path)
-        await status_msg.edit_text(f"📥 Изображение сохранено в docs проекта <b>{proj_name}</b> как <code>{filename}</code>.", parse_mode="HTML")
+        await message.reply(f"📥 Изображение сохранено в docs проекта <b>{proj_name}</b> как <code>{filename}</code>.", parse_mode="HTML")
     except Exception as e:
         logger.error("Failed to download photo: %s", e)
-        await status_msg.edit_text(f"❌ Ошибка при скачивании изображения: {e}")
+        await message.reply(f"❌ Ошибка при скачивании изображения: {e}")
 
 @task_router.message(F.text)
 async def process_text_message(message: Message) -> None:
@@ -860,20 +890,22 @@ async def process_text_message(message: Message) -> None:
         return
         
     proj_name, proj_path, _, conv_id = project
-    progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта <b>{proj_name}</b>...", parse_mode="HTML")
     
-    result = await run_agy_prompt(proj_path, message.text, conv_id)
+    # Show typing indicator in background
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(message.bot, message.chat.id, thread_id, stop_event))
     
+    try:
+        result = await run_agy_prompt(proj_path, message.text, conv_id)
+    finally:
+        stop_event.set()
+        await typing_task
+        
     if len(result) > 4000:
         for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
             await message.reply(chunk)
     else:
         await message.reply(result)
-        
-    try:
-        await progress_msg.delete()
-    except Exception:
-        pass
 
 # ---------------------------------------------------------------------------
 # Entry point
