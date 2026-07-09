@@ -7,7 +7,6 @@ import urllib.parse
 import hashlib
 import aiohttp
 import base64
-import sqlite3
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message
@@ -23,12 +22,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Check your .env file.")
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is not set.")
+
 # Bitrix24 Sync API URL and Secure Key
 CRM_BASE_URL = "http://bitrix24.aisage.ru"
 SECURE_KEY = "CRM_SECURE_KEY_2026_SAGE"
 ALLOWED_USERNAMES = ["michael_sage"]
-
-DB_PATH = "bot_data.db"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,57 +39,108 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# DB Helpers
+# Supabase DB Helpers
 # ---------------------------------------------------------------------------
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS project_mappings (
-            thread_id INTEGER PRIMARY KEY,
-            project_name TEXT NOT NULL,
-            project_path TEXT NOT NULL,
-            github_repo TEXT,
-            status TEXT DEFAULT 'active'
-        );
-    """)
-    conn.commit()
-    conn.close()
-
-def get_project_by_thread(thread_id: int):
+async def get_project_by_thread(thread_id: int):
     if not thread_id:
         return None
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT project_name, project_path, github_repo FROM project_mappings WHERE thread_id = ? AND status = 'active'", (thread_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
+    url = f"{SUPABASE_URL}/rest/v1/project_mappings?thread_id=eq.{thread_id}&status=eq.active"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    rows = await resp.json()
+                    if rows:
+                        row = rows[0]
+                        return row.get("project_name"), row.get("project_path"), row.get("github_repo")
+                else:
+                    err_text = await resp.text()
+                    logger.error("Supabase error (status=%s): %s", resp.status, err_text)
+    except Exception as e:
+        logger.error("Failed to query Supabase: %s", e)
+    return None
 
-def register_project(thread_id: int, name: str, path: str, github_repo: str = None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO project_mappings (thread_id, project_name, project_path, github_repo, status)
-        VALUES (?, ?, ?, ?, 'active')
-    """, (thread_id, name, path, github_repo))
-    conn.commit()
-    conn.close()
+async def register_project(thread_id: int, name: str, path: str, github_repo: str = None):
+    url = f"{SUPABASE_URL}/rest/v1/project_mappings"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates"
+    }
+    payload = {
+        "thread_id": thread_id,
+        "project_name": name,
+        "project_path": path,
+        "github_repo": github_repo,
+        "status": "active"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status not in (200, 201):
+                    err_text = await resp.text()
+                    logger.error("Failed to upsert project in Supabase (status=%s): %s", resp.status, err_text)
+    except Exception as e:
+        logger.error("Exception upserting project in Supabase: %s", e)
 
-def update_github_repo(thread_id: int, github_repo: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE project_mappings SET github_repo = ? WHERE thread_id = ?", (github_repo, thread_id))
-    conn.commit()
-    conn.close()
+async def update_github_repo(thread_id: int, github_repo: str):
+    url = f"{SUPABASE_URL}/rest/v1/project_mappings?thread_id=eq.{thread_id}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "github_repo": github_repo
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, json=payload, headers=headers) as resp:
+                if resp.status not in (200, 204):
+                    err_text = await resp.text()
+                    logger.error("Failed to update github repo in Supabase (status=%s): %s", resp.status, err_text)
+    except Exception as e:
+        logger.error("Exception updating github repo in Supabase: %s", e)
 
-def archive_project_in_db(thread_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE project_mappings SET status = 'archived' WHERE thread_id = ?", (thread_id,))
-    conn.commit()
-    conn.close()
+async def archive_project_in_db(thread_id: int):
+    url = f"{SUPABASE_URL}/rest/v1/project_mappings?thread_id=eq.{thread_id}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "status": "archived"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, json=payload, headers=headers) as resp:
+                if resp.status not in (200, 204):
+                    err_text = await resp.text()
+                    logger.error("Failed to archive project in Supabase (status=%s): %s", resp.status, err_text)
+    except Exception as e:
+        logger.error("Exception archiving project in Supabase: %s", e)
+
+async def get_active_projects_list():
+    url = f"{SUPABASE_URL}/rest/v1/project_mappings?status=eq.active"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        logger.error("Failed to get projects list from Supabase: %s", e)
+    return []
 
 def get_slug(name: str) -> str:
     # Translitterate Cyrillic to Latin and clean up
@@ -299,7 +352,7 @@ async def handle_topic_created(message: Message) -> None:
     if topic_name.lower().startswith("проект:"):
         project_name = topic_name[7:].strip()
         slug = get_slug(project_name)
-        project_path = f"/root/workspace/{slug}"
+        project_path = f"/root/workspace/AiSage-Проект-{slug}"
         
         os.makedirs(project_path, exist_ok=True)
         os.makedirs(os.path.join(project_path, "docs"), exist_ok=True)
@@ -316,7 +369,7 @@ async def handle_topic_created(message: Message) -> None:
             except Exception as e:
                 logger.error("Git init failed: %s", e)
                 
-        register_project(thread_id, project_name, project_path)
+        await register_project(thread_id, project_name, project_path)
         await message.reply(f"🤖 **Google Antigravity: Проект зарегистрирован!**\n\n"
                             f"📁 Создана рабочая папка проекта: `{project_path}`\n"
                             f"🐙 Инициализирован локальный Git-репозиторий.")
@@ -332,15 +385,14 @@ async def status_command(message: Message) -> None:
     used_gb = used / (1024**3)
     total_gb = total / (1024**3)
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT thread_id, project_name, project_path, github_repo FROM project_mappings WHERE status = 'active'")
-    rows = cursor.fetchall()
-    conn.close()
+    rows = await get_active_projects_list()
     
     project_list = []
     for row in rows:
-        th_id, name, path, repo = row
+        th_id = row.get("thread_id")
+        name = row.get("project_name")
+        path = row.get("project_path")
+        repo = row.get("github_repo")
         repo_str = f" ([GitHub]({repo}))" if repo else ""
         project_list.append(f"• **{name}** (Тема ID: `{th_id}`){repo_str}\n  `{path}`")
         
@@ -360,7 +412,7 @@ async def archive_command(message: Message) -> None:
         return
         
     thread_id = message.message_thread_id
-    project = get_project_by_thread(thread_id)
+    project = await get_project_by_thread(thread_id)
     if not project:
         await message.reply("⚠️ Эта тема не привязана к активному проекту.")
         return
@@ -400,7 +452,7 @@ async def archive_command(message: Message) -> None:
         await status_msg.edit_text(f"📦 Архивация **{proj_name}**: Удаляю рабочую папку с VPS...")
         shutil.rmtree(proj_path)
         
-        archive_project_in_db(thread_id)
+        await archive_project_in_db(thread_id)
         
         git_note = " (изменения запушены в GitHub)" if git_pushed else ""
         await status_msg.edit_text(f"✅ **Проект {proj_name} успешно архивирован!**\n\n"
@@ -427,7 +479,7 @@ async def link_project_command(message: Message) -> None:
         
     project_input = parts[1].strip()
     slug = get_slug(project_input)
-    project_path = f"/root/workspace/{slug}"
+    project_path = f"/root/workspace/AiSage-Проект-{slug}"
     
     os.makedirs(project_path, exist_ok=True)
     os.makedirs(os.path.join(project_path, "docs"), exist_ok=True)
@@ -444,7 +496,7 @@ async def link_project_command(message: Message) -> None:
         except Exception as e:
             logger.error("Git init failed: %s", e)
             
-    register_project(thread_id, project_input, project_path)
+    await register_project(thread_id, project_input, project_path)
     await message.reply(f"🔗 **Тема успешно привязана к проекту!**\n\n"
                         f"📁 Папка проекта: `{project_path}`\n"
                         f"🤖 Antigravity готов к работе в этой теме.")
@@ -455,7 +507,7 @@ async def link_github_command(message: Message) -> None:
         return
         
     thread_id = message.message_thread_id
-    project = get_project_by_thread(thread_id)
+    project = await get_project_by_thread(thread_id)
     if not project:
         await message.reply("⚠️ Эта тема не привязана к проекту. Сначала вызовите `/link_project [имя]`.")
         return
@@ -467,7 +519,7 @@ async def link_github_command(message: Message) -> None:
         return
         
     repo_url = parts[1].strip()
-    update_github_repo(thread_id, repo_url)
+    await update_github_repo(thread_id, repo_url)
     
     try:
         proc_rem = await asyncio.create_subprocess_exec(
@@ -569,7 +621,7 @@ async def process_voice_task(message: Message) -> None:
         await sync_tasks_to_crm(message, date_str, projects)
     else:
         thread_id = message.message_thread_id
-        project = get_project_by_thread(thread_id)
+        project = await get_project_by_thread(thread_id)
         if project:
             proj_name, proj_path, _ = project
             progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта **{proj_name}**...")
@@ -592,7 +644,7 @@ async def process_document(message: Message) -> None:
         return
         
     thread_id = message.message_thread_id
-    project = get_project_by_thread(thread_id)
+    project = await get_project_by_thread(thread_id)
     if not project:
         return
         
@@ -620,7 +672,7 @@ async def process_photo(message: Message) -> None:
         return
         
     thread_id = message.message_thread_id
-    project = get_project_by_thread(thread_id)
+    project = await get_project_by_thread(thread_id)
     if not project:
         return
         
@@ -656,7 +708,7 @@ async def process_text_message(message: Message) -> None:
         return
         
     thread_id = message.message_thread_id
-    project = get_project_by_thread(thread_id)
+    project = await get_project_by_thread(thread_id)
     if not project:
         return
         
@@ -695,7 +747,6 @@ async def start_web_server() -> None:
     logger.info(f"Web server started on port {os.getenv('PORT', 8080)}")
 
 async def main() -> None:
-    init_db()
     bot = Bot(token=BOT_TOKEN)
     logger.info("Bot is starting…")
     
