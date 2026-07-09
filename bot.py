@@ -27,6 +27,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is not set.")
 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
 # Bitrix24 Sync API URL and Secure Key
 CRM_BASE_URL = "http://bitrix24.aisage.ru"
 SECURE_KEY = "CRM_SECURE_KEY_2026_SAGE"
@@ -142,8 +144,77 @@ async def get_active_projects_list():
         logger.error("Failed to get projects list from Supabase: %s", e)
     return []
 
+# ---------------------------------------------------------------------------
+# GitHub API Helpers
+# ---------------------------------------------------------------------------
+
+async def create_github_repo(slug: str) -> tuple:
+    if not GITHUB_TOKEN:
+        logger.warning("GITHUB_TOKEN is not set. Skipping auto repo creation.")
+        return None, None
+        
+    url = "https://api.github.com/user/repos"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "name": f"AiSage-Proekt-{slug}",
+        "private": True
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status == 201:
+                    data = await resp.json()
+                    return data.get("ssh_url"), data.get("html_url")
+                elif resp.status == 422:
+                    logger.info("GitHub repo AiSage-Proekt-%s already exists, linking to it.", slug)
+                    fallback_ssh = f"git@github.com:RealMichaelSage/AiSage-Proekt-{slug}.git"
+                    fallback_web = f"https://github.com/RealMichaelSage/AiSage-Proekt-{slug}"
+                    return fallback_ssh, fallback_web
+                else:
+                    err_text = await resp.text()
+                    logger.error("Failed to create GitHub repo (status=%s): %s", resp.status, err_text)
+    except Exception as e:
+        logger.error("Exception creating GitHub repo: %s", e)
+    return None, None
+
+async def setup_local_git(project_path: str, repo_url: str) -> None:
+    if not os.path.exists(os.path.join(project_path, ".git")):
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "git", "init",
+                cwd=project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.communicate()
+        except Exception as e:
+            logger.error("Git init failed in %s: %s", project_path, e)
+            
+    if repo_url:
+        try:
+            proc_rem = await asyncio.create_subprocess_exec(
+                "git", "remote", "remove", "origin",
+                cwd=project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc_rem.communicate()
+            
+            proc_add = await asyncio.create_subprocess_exec(
+                "git", "remote", "add", "origin", repo_url,
+                cwd=project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc_add.communicate()
+        except Exception as e:
+            logger.error("Failed to configure git remote in %s: %s", project_path, e)
+
 def get_slug(name: str) -> str:
-    # Translitterate Cyrillic to Latin and clean up
     name = name.lower()
     translit_map = {
         'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z','и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'sch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya'
@@ -357,22 +428,21 @@ async def handle_topic_created(message: Message) -> None:
         os.makedirs(project_path, exist_ok=True)
         os.makedirs(os.path.join(project_path, "docs"), exist_ok=True)
         
-        if not os.path.exists(os.path.join(project_path, ".git")):
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    "git", "init",
-                    cwd=project_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                await process.communicate()
-            except Exception as e:
-                logger.error("Git init failed: %s", e)
-                
-        await register_project(thread_id, project_name, project_path)
+        # 1. Create GitHub Repo
+        ssh_url, web_url = await create_github_repo(slug)
+        
+        # 2. Setup local git
+        await setup_local_git(project_path, ssh_url)
+        
+        # 3. Register in Supabase
+        await register_project(thread_id, project_name, project_path, ssh_url)
+        
+        github_note = f"\n🐙 **GitHub:** [Создан репозиторий]({web_url})" if web_url else "\n⚠️ Не удалось автоматически создать репозиторий на GitHub."
         await message.reply(f"🤖 **Google Antigravity: Проект зарегистрирован!**\n\n"
                             f"📁 Создана рабочая папка проекта: `{project_path}`\n"
-                            f"🐙 Инициализирован локальный Git-репозиторий.")
+                            f"⚙️ Git-репозиторий инициализирован.{github_note}",
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True)
 
 @task_router.message(F.text == "/status")
 async def status_command(message: Message) -> None:
@@ -484,22 +554,21 @@ async def link_project_command(message: Message) -> None:
     os.makedirs(project_path, exist_ok=True)
     os.makedirs(os.path.join(project_path, "docs"), exist_ok=True)
     
-    if not os.path.exists(os.path.join(project_path, ".git")):
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "git", "init",
-                cwd=project_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await process.communicate()
-        except Exception as e:
-            logger.error("Git init failed: %s", e)
-            
-    await register_project(thread_id, project_input, project_path)
+    # 1. Create GitHub Repo
+    ssh_url, web_url = await create_github_repo(slug)
+    
+    # 2. Setup local git
+    await setup_local_git(project_path, ssh_url)
+    
+    # 3. Register in Supabase
+    await register_project(thread_id, project_input, project_path, ssh_url)
+    
+    github_note = f"\n🐙 **GitHub:** [Привязан репозиторий]({web_url})" if web_url else "\n⚠️ Не удалось автоматически создать/привязать репозиторий на GitHub."
     await message.reply(f"🔗 **Тема успешно привязана к проекту!**\n\n"
                         f"📁 Папка проекта: `{project_path}`\n"
-                        f"🤖 Antigravity готов к работе в этой теме.")
+                        f"🤖 Antigravity готов к работе в этой теме.{github_note}",
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True)
 
 @task_router.message(F.text.startswith("/link_github"))
 async def link_github_command(message: Message) -> None:
