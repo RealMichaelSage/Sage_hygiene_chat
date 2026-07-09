@@ -729,7 +729,7 @@ async def process_voice_task(message: Message) -> None:
     transcription = ""
     try:
         async with aiohttp.ClientSession() as session:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
             payload = {
                 "contents": [{
                     "parts": [
