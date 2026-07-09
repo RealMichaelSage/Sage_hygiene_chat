@@ -325,7 +325,7 @@ async def run_agy_prompt(project_path: str, prompt: str, conversation_id: str = 
     env["https_proxy"] = "http://127.0.0.1:8118"
     env["PATH"] = "/root/.local/bin:" + env.get("PATH", "")
     
-    args = ["/root/.local/bin/agy"]
+    args = ["/root/.local/bin/agy", "--dangerously-skip-permissions"]
     if conversation_id:
         args.extend(["--conversation", conversation_id])
     args.extend(["--print", prompt])
