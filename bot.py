@@ -320,10 +320,10 @@ async def run_agy_prompt(project_path: str, prompt: str) -> str:
         if process.returncode == 0:
             return stdout_str
         else:
-            return f"❌ Ошибка выполнения Antigravity (код {process.returncode}):\n\n{stdout_str}\n\n{stderr_str}"
+            return f"Ошибка выполнения Antigravity (код {process.returncode}):\n\n{stdout_str}\n\n{stderr_str}"
     except Exception as e:
         logger.error("Exception during agy exec: %s", e)
-        return f"❌ Исключение при выполнении команды: {e}"
+        return f"Исключение при выполнении команды: {e}"
 
 async def sync_tasks_to_crm(message: Message, date_str: str, projects: dict) -> None:
     url = f"{CRM_BASE_URL}/sync_tasks_meetings.php"
@@ -334,7 +334,7 @@ async def sync_tasks_to_crm(message: Message, date_str: str, projects: dict) -> 
             if not tasks:
                 continue
                 
-            project_report = [f"\n📁 **Проект {project_name}:**"]
+            project_report = [f"\n📁 <b>Проект {project_name}:</b>"]
             
             for idx, task_text in enumerate(tasks, 1):
                 full_title = f"{project_name}: {task_text}"
@@ -362,30 +362,30 @@ async def sync_tasks_to_crm(message: Message, date_str: str, projects: dict) -> 
                                     deal_id = data.get("deal_id")
                                     status_icon = "💼"
                                     status_text = "создано в CRM" if sync_status == "created" else "уже записано в CRM"
-                                    project_report.append(f"{idx}. {status_icon} {task_text} — **{status_text}** (Сделка ID: {deal_id})")
+                                    project_report.append(f"{idx}. {status_icon} {task_text} — <b>{status_text}</b> (Сделка ID: {deal_id})")
                                 else:
                                     task_id = data.get("task_id")
                                     status_icon = "✅"
                                     status_text = "создано в Задачнике" if sync_status == "created" else "обновлено/уже есть"
                                     task_url = f"https://bitrix24.aisage.ru/company/personal/user/1/tasks/task/view/{task_id}/"
-                                    project_report.append(f"{idx}. {status_icon} [{task_text}]({task_url}) — **{status_text}**")
+                                    project_report.append(f"{idx}. {status_icon} <a href='{task_url}'>{task_text}</a> — <b>{status_text}</b>")
                             else:
-                                project_report.append(f"{idx}. ❌ {task_text} — **Ошибка**: {data.get('message')}")
+                                project_report.append(f"{idx}. ❌ {task_text} — <b>Ошибка</b>: {data.get('message')}")
                         else:
-                            project_report.append(f"{idx}. ❌ {task_text} — **Ошибка сервера** ({resp.status})")
+                            project_report.append(f"{idx}. ❌ {task_text} — <b>Ошибка сервера</b> ({resp.status})")
                 except Exception as exc:
                     logger.error("Sync request failed for task '%s': %s", full_title, exc)
-                    project_report.append(f"{idx}. ❌ {task_text} — **Ошибка сети**: {exc}")
+                    project_report.append(f"{idx}. ❌ {task_text} — <b>Ошибка сети</b>: {exc}")
                     
             results_report.append("\n".join(project_report))
             
-    report_message = f"📊 **Отчет о синхронизации задач Михаил Пузырёв на {date_str}:**\n" + "\n".join(results_report)
+    report_message = f"📊 <b>Отчет о синхронизации задач на {date_str}:</b>\n" + "\n".join(results_report)
     
     if len(report_message) > 4000:
         for chunk in [report_message[i:i+4000] for i in range(0, len(report_message), 4000)]:
-            await message.answer(chunk, parse_mode="Markdown", disable_web_page_preview=True)
+            await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
     else:
-        await message.answer(report_message, parse_mode="Markdown", disable_web_page_preview=True)
+        await message.answer(report_message, parse_mode="HTML", disable_web_page_preview=True)
 
 # ---------------------------------------------------------------------------
 # Handlers
@@ -437,11 +437,13 @@ async def handle_topic_created(message: Message) -> None:
         # 3. Register in Supabase
         await register_project(thread_id, project_name, project_path, ssh_url)
         
-        github_note = f"\n🐙 **GitHub:** [Создан репозиторий]({web_url})" if web_url else "\n⚠️ Не удалось автоматически создать репозиторий на GitHub."
-        await message.reply(f"🤖 **Google Antigravity: Проект зарегистрирован!**\n\n"
-                            f"📁 Создана рабочая папка проекта: `{project_path}`\n"
-                            f"⚙️ Git-репозиторий инициализирован.{github_note}",
-                            parse_mode="Markdown",
+        github_note = f"• На <b>GitHub</b> создан приватный репозиторий: <a href='{web_url}'>открыть</a>" if web_url else "• ⚠️ Не удалось создать репозиторий на GitHub."
+        await message.reply(f"🤖 <b>Проект зарегистрирован!</b>\n\n"
+                            f"• В <b>Supabase</b> создана база данных\n"
+                            f"{github_note}\n"
+                            f"• В <b>Antigravity</b> проект активирован\n"
+                            f"• На хостинге (VPS) создана папка: <code>AiSage-Проект-{slug}</code>",
+                            parse_mode="HTML",
                             disable_web_page_preview=True)
 
 @task_router.message(F.text == "/status")
@@ -463,18 +465,19 @@ async def status_command(message: Message) -> None:
         name = row.get("project_name")
         path = row.get("project_path")
         repo = row.get("github_repo")
-        repo_str = f" ([GitHub]({repo}))" if repo else ""
-        project_list.append(f"• **{name}** (Тема ID: `{th_id}`){repo_str}\n  `{path}`")
+        repo_str = f" (<a href='{repo}'>GitHub</a>)" if repo else ""
+        folder_name = os.path.basename(path)
+        project_list.append(f"• <b>{name}</b> (Тема: <code>{th_id}</code>){repo_str}\n  Папка: <code>{folder_name}</code>")
         
     proj_str = "\n".join(project_list) if project_list else "Нет активных проектов."
     
     status_text = (
-        f"📊 **Статус системы Antigravity VPS:**\n\n"
-        f"💾 **Диск:** Свободно {free_gb:.1f} GB из {total_gb:.1f} GB (Использовано {used_gb:.1f} GB)\n\n"
-        f"📁 **Активные проекты:**\n{proj_str}"
+        f"📊 <b>Статус системы Antigravity VPS:</b>\n\n"
+        f"💾 <b>Диск:</b> Свободно {free_gb:.1f} GB из {total_gb:.1f} GB (Использовано {used_gb:.1f} GB)\n\n"
+        f"📁 <b>Активные проекты:</b>\n{proj_str}"
     )
     
-    await message.reply(status_text, parse_mode="Markdown", disable_web_page_preview=True)
+    await message.reply(status_text, parse_mode="HTML", disable_web_page_preview=True)
 
 @task_router.message(F.text == "/archive")
 async def archive_command(message: Message) -> None:
@@ -488,7 +491,7 @@ async def archive_command(message: Message) -> None:
         return
         
     proj_name, proj_path, _ = project
-    status_msg = await message.reply(f"📦 Начинаю архивацию проекта **{proj_name}**...")
+    status_msg = await message.reply(f"📦 Начинаю архивацию проекта <b>{proj_name}</b>...")
     
     try:
         git_pushed = False
@@ -501,7 +504,7 @@ async def archive_command(message: Message) -> None:
             )
             stdout, _ = await proc_check.communicate()
             if b"origin" in stdout:
-                await status_msg.edit_text(f"📦 Архивация **{proj_name}**: Делаю git push...")
+                await status_msg.edit_text(f"📦 Архивация <b>{proj_name}</b>: Делаю git push...")
                 proc_push = await asyncio.create_subprocess_exec(
                     "git", "push", "-u", "origin", "main",
                     cwd=proj_path,
@@ -516,18 +519,18 @@ async def archive_command(message: Message) -> None:
         os.makedirs(archive_dir, exist_ok=True)
         zip_path = os.path.join(archive_dir, f"{get_slug(proj_name)}_{datetime.date.today().strftime('%Y%m%d')}")
         
-        await status_msg.edit_text(f"📦 Архивация **{proj_name}**: Создаю ZIP-архив...")
+        await status_msg.edit_text(f"📦 Архивация <b>{proj_name}</b>: Создаю ZIP-архив...")
         shutil.make_archive(zip_path, 'zip', proj_path)
         
-        await status_msg.edit_text(f"📦 Архивация **{proj_name}**: Удаляю рабочую папку с VPS...")
+        await status_msg.edit_text(f"📦 Архивация <b>{proj_name}</b>: Удаляю рабочую папку с VPS...")
         shutil.rmtree(proj_path)
         
         await archive_project_in_db(thread_id)
         
         git_note = " (изменения запушены в GitHub)" if git_pushed else ""
-        await status_msg.edit_text(f"✅ **Проект {proj_name} успешно архивирован!**\n\n"
-                                    f"📁 Архив сохранен: `{zip_path}.zip`{git_note}.\n"
-                                    f"Рабочая директория очищена.")
+        await status_msg.edit_text(f"✅ <b>Проект {proj_name} успешно архивирован!</b>\n\n"
+                                    f"📁 Архив сохранен: <code>{zip_path}.zip</code>{git_note}.\n"
+                                    f"Рабочая директория очищена.", parse_mode="HTML")
     except Exception as e:
         logger.error("Archive failed: %s", e)
         await status_msg.edit_text(f"❌ Ошибка архивации проекта: {e}")
@@ -544,7 +547,7 @@ async def link_project_command(message: Message) -> None:
         
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply("⚠️ Укажите имя проекта или slug. Пример:\n`/link_project vector` или `/link_project Проект Вектор`")
+        await message.reply("⚠️ Укажите имя проекта или slug. Пример:\n<code>/link_project vector</code>", parse_mode="HTML")
         return
         
     project_input = parts[1].strip()
@@ -563,11 +566,13 @@ async def link_project_command(message: Message) -> None:
     # 3. Register in Supabase
     await register_project(thread_id, project_input, project_path, ssh_url)
     
-    github_note = f"\n🐙 **GitHub:** [Привязан репозиторий]({web_url})" if web_url else "\n⚠️ Не удалось автоматически создать/привязать репозиторий на GitHub."
-    await message.reply(f"🔗 **Тема успешно привязана к проекту!**\n\n"
-                        f"📁 Папка проекта: `{project_path}`\n"
-                        f"🤖 Antigravity готов к работе в этой теме.{github_note}",
-                        parse_mode="Markdown",
+    github_note = f"• На <b>GitHub</b> привязан репозиторий: <a href='{web_url}'>открыть</a>" if web_url else "• ⚠️ Не удалось создать/привязать репозиторий на GitHub."
+    await message.reply(f"🔗 <b>Тема успешно привязана к проекту!</b>\n\n"
+                        f"• В <b>Supabase</b> обновлена база данных\n"
+                        f"{github_note}\n"
+                        f"• В <b>Antigravity</b> проект активирован\n"
+                        f"• На хостинге (VPS) привязана рабочая папка: <code>AiSage-Проект-{slug}</code>",
+                        parse_mode="HTML",
                         disable_web_page_preview=True)
 
 @task_router.message(F.text.startswith("/link_github"))
@@ -584,7 +589,7 @@ async def link_github_command(message: Message) -> None:
     proj_name, proj_path, _ = project
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply("⚠️ Укажите URL-адрес GitHub репозитория. Пример:\n`/link_github https://github.com/username/repo.git`")
+        await message.reply("⚠️ Укажите URL-адрес GitHub репозитория. Пример:\n<code>/link_github https://github.com/username/repo.git</code>", parse_mode="HTML")
         return
         
     repo_url = parts[1].strip()
@@ -607,7 +612,7 @@ async def link_github_command(message: Message) -> None:
         )
         await proc_add.communicate()
         
-        await message.reply(f"🔗 **Репозиторий GitHub привязан к проекту {proj_name}!**\n\nGit remote настроен на: `{repo_url}`")
+        await message.reply(f"🔗 <b>Репозиторий GitHub привязан к проекту {proj_name}!</b>\n\nGit remote настроен на: <code>{repo_url}</code>", parse_mode="HTML")
     except Exception as e:
         logger.error("Failed to set git remote: %s", e)
         await message.reply(f"⚠️ Репозиторий сохранен в БД, но не удалось настроить git remote локально: {e}")
@@ -683,7 +688,7 @@ async def process_voice_task(message: Message) -> None:
         await status_msg.edit_text("⚠️ Голосовое сообщение пустое или не распознано.")
         return
         
-    await status_msg.edit_text(f"📝 **Распознанный текст:**\n\n{transcription}")
+    await status_msg.edit_text(f"📝 <b>Распознанный текст:</b>\n\n{transcription}", parse_mode="HTML")
     
     date_str, projects = parse_task_list(transcription)
     if projects:
@@ -693,7 +698,7 @@ async def process_voice_task(message: Message) -> None:
         project = await get_project_by_thread(thread_id)
         if project:
             proj_name, proj_path, _ = project
-            progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта **{proj_name}**...")
+            progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта <b>{proj_name}</b>...", parse_mode="HTML")
             result = await run_agy_prompt(proj_path, transcription)
             if len(result) > 4000:
                 for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
@@ -705,7 +710,7 @@ async def process_voice_task(message: Message) -> None:
             except Exception:
                 pass
         else:
-            await message.reply("💡 Голосовое сообщение распознано, но эта тема не привязана ни к одному проекту. Создайте тему с префиксом `Проект: [Название]` или введите `/link_project [slug]` для привязки.")
+            await message.reply("💡 Голосовое сообщение распознано, но эта тема не привязана ни к одному проекту. Создайте тему с префиксом <code>Проект: [Название]</code> или введите <code>/link_project [slug]</code> для привязки.", parse_mode="HTML")
 
 @task_router.message(F.content_type == ContentType.DOCUMENT)
 async def process_document(message: Message) -> None:
@@ -725,12 +730,12 @@ async def process_document(message: Message) -> None:
     os.makedirs(docs_dir, exist_ok=True)
     dest_path = os.path.join(docs_dir, filename)
     
-    status_msg = await message.reply(f"⏳ Скачиваю файл `{filename}` в папку `docs/` проекта...")
+    status_msg = await message.reply(f"⏳ Скачиваю файл <code>{filename}</code> в папку docs проекта...", parse_mode="HTML")
     
     try:
         file_info = await message.bot.get_file(doc.file_id)
         await message.bot.download_file(file_info.file_path, dest_path)
-        await status_msg.edit_text(f"📥 Файл `{filename}` успешно сохранен в `docs/` проекта **{proj_name}**.")
+        await status_msg.edit_text(f"📥 Файл <code>{filename}</code> успешно сохранен в docs проекта <b>{proj_name}</b>.", parse_mode="HTML")
     except Exception as e:
         logger.error("Failed to download document: %s", e)
         await status_msg.edit_text(f"❌ Ошибка при скачивании файла: {e}")
@@ -753,12 +758,12 @@ async def process_photo(message: Message) -> None:
     os.makedirs(docs_dir, exist_ok=True)
     dest_path = os.path.join(docs_dir, filename)
     
-    status_msg = await message.reply("⏳ Скачиваю изображение в папку `docs/`...")
+    status_msg = await message.reply("⏳ Скачиваю изображение в папку docs...")
     
     try:
         file_info = await message.bot.get_file(photo.file_id)
         await message.bot.download_file(file_info.file_path, dest_path)
-        await status_msg.edit_text(f"📥 Изображение сохранено в `docs/` проекта **{proj_name}** как `{filename}`.")
+        await status_msg.edit_text(f"📥 Изображение сохранено в docs проекта <b>{proj_name}</b> как <code>{filename}</code>.", parse_mode="HTML")
     except Exception as e:
         logger.error("Failed to download photo: %s", e)
         await status_msg.edit_text(f"❌ Ошибка при скачивании изображения: {e}")
@@ -782,7 +787,7 @@ async def process_text_message(message: Message) -> None:
         return
         
     proj_name, proj_path, _ = project
-    progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта **{proj_name}**...")
+    progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта <b>{proj_name}</b>...", parse_mode="HTML")
     
     result = await run_agy_prompt(proj_path, message.text)
     
