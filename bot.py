@@ -59,7 +59,12 @@ async def get_project_by_thread(thread_id: int):
                     rows = await resp.json()
                     if rows:
                         row = rows[0]
-                        return row.get("project_name"), row.get("project_path"), row.get("github_repo")
+                        return (
+                            row.get("project_name"),
+                            row.get("project_path"),
+                            row.get("github_repo"),
+                            row.get("conversation_id")
+                        )
                 else:
                     err_text = await resp.text()
                     logger.error("Supabase error (status=%s): %s", resp.status, err_text)
@@ -67,7 +72,7 @@ async def get_project_by_thread(thread_id: int):
         logger.error("Failed to query Supabase: %s", e)
     return None
 
-async def register_project(thread_id: int, name: str, path: str, github_repo: str = None):
+async def register_project(thread_id: int, name: str, path: str, github_repo: str = None, conversation_id: str = None):
     url = f"{SUPABASE_URL}/rest/v1/project_mappings"
     headers = {
         "apikey": SUPABASE_KEY,
@@ -80,6 +85,7 @@ async def register_project(thread_id: int, name: str, path: str, github_repo: st
         "project_name": name,
         "project_path": path,
         "github_repo": github_repo,
+        "conversation_id": conversation_id,
         "status": "active"
     }
     try:
@@ -90,6 +96,25 @@ async def register_project(thread_id: int, name: str, path: str, github_repo: st
                     logger.error("Failed to upsert project in Supabase (status=%s): %s", resp.status, err_text)
     except Exception as e:
         logger.error("Exception upserting project in Supabase: %s", e)
+
+async def link_conversation_to_thread(thread_id: int, conversation_id: str):
+    url = f"{SUPABASE_URL}/rest/v1/project_mappings?thread_id=eq.{thread_id}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "conversation_id": conversation_id
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, json=payload, headers=headers) as resp:
+                if resp.status not in (200, 204):
+                    err_text = await resp.text()
+                    logger.error("Failed to link conversation in Supabase (status=%s): %s", resp.status, err_text)
+    except Exception as e:
+        logger.error("Exception linking conversation in Supabase: %s", e)
 
 async def update_github_repo(thread_id: int, github_repo: str):
     url = f"{SUPABASE_URL}/rest/v1/project_mappings?thread_id=eq.{thread_id}"
@@ -292,7 +317,7 @@ def parse_task_list(text: str):
                 
     return date_str, projects
 
-async def run_agy_prompt(project_path: str, prompt: str) -> str:
+async def run_agy_prompt(project_path: str, prompt: str, conversation_id: str = None) -> str:
     env = os.environ.copy()
     env["HTTP_PROXY"] = "http://127.0.0.1:8118"
     env["HTTPS_PROXY"] = "http://127.0.0.1:8118"
@@ -300,11 +325,16 @@ async def run_agy_prompt(project_path: str, prompt: str) -> str:
     env["https_proxy"] = "http://127.0.0.1:8118"
     env["PATH"] = "/root/.local/bin:" + env.get("PATH", "")
     
-    logger.info("Executing agy command in %s with prompt: %s", project_path, prompt)
+    args = ["/root/.local/bin/agy"]
+    if conversation_id:
+        args.extend(["--conversation", conversation_id])
+    args.extend(["--print", prompt])
+    
+    logger.info("Executing agy command in %s with args: %s", project_path, args)
     
     try:
         process = await asyncio.create_subprocess_exec(
-            "/root/.local/bin/agy", "--print", prompt,
+            *args,
             cwd=project_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -490,7 +520,7 @@ async def archive_command(message: Message) -> None:
         await message.reply("⚠️ Эта тема не привязана к активному проекту.")
         return
         
-    proj_name, proj_path, _ = project
+    proj_name, proj_path, _, _ = project
     status_msg = await message.reply(f"📦 Начинаю архивацию проекта <b>{proj_name}</b>...")
     
     try:
@@ -586,7 +616,7 @@ async def link_github_command(message: Message) -> None:
         await message.reply("⚠️ Эта тема не привязана к проекту. Сначала вызовите `/link_project [имя]`.")
         return
         
-    proj_name, proj_path, _ = project
+    proj_name, proj_path, _, _ = project
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         await message.reply("⚠️ Укажите URL-адрес GitHub репозитория. Пример:\n<code>/link_github https://github.com/username/repo.git</code>", parse_mode="HTML")
@@ -616,6 +646,49 @@ async def link_github_command(message: Message) -> None:
     except Exception as e:
         logger.error("Failed to set git remote: %s", e)
         await message.reply(f"⚠️ Репозиторий сохранен в БД, но не удалось настроить git remote локально: {e}")
+
+@task_router.message(F.text.startswith("/link_dialog"))
+async def link_dialog_command(message: Message) -> None:
+    if not message.from_user or not message.from_user.username or message.from_user.username.lower() not in ALLOWED_USERNAMES:
+        return
+        
+    thread_id = message.message_thread_id
+    if not thread_id:
+        await message.reply("⚠️ Эту команду можно вызывать только внутри тем (топиков) группы.")
+        return
+        
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.reply("⚠️ Укажите ID диалога Antigravity. Пример:\n<code>/link_dialog be022b77-28f6-4eca-9214-bfa1eb2053ef</code>", parse_mode="HTML")
+        return
+        
+    conv_id = parts[1].strip()
+    
+    # Check if project exists for this thread
+    project = await get_project_by_thread(thread_id)
+    if not project:
+        # Create a placeholder project/dialog entry
+        project_name = f"Диалог {conv_id[:8]}"
+        slug = get_slug(project_name)
+        project_path = f"/root/workspace/AiSage-Проект-{slug}"
+        os.makedirs(project_path, exist_ok=True)
+        os.makedirs(os.path.join(project_path, "docs"), exist_ok=True)
+        
+        # Create GitHub repo automatically
+        ssh_url, web_url = await create_github_repo(slug)
+        await setup_local_git(project_path, ssh_url)
+        await register_project(thread_id, project_name, project_path, ssh_url, conv_id)
+        github_note = f"\n• На <b>GitHub</b> создан репозиторий: <a href='{web_url}'>открыть</a>" if web_url else ""
+    else:
+        # Update existing mapping
+        await link_conversation_to_thread(thread_id, conv_id)
+        github_note = ""
+        
+    await message.reply(f"✅ <b>Тема успешно привязана к диалогу Antigravity!</b>\n\n"
+                        f"• ID диалога: <code>{conv_id}</code>\n"
+                        f"• Все сообщения в этой теме теперь будут синхронизироваться с вашим Mac.{github_note}",
+                        parse_mode="HTML",
+                        disable_web_page_preview=True)
 
 @task_router.message(F.content_type == ContentType.VOICE)
 async def process_voice_task(message: Message) -> None:
@@ -697,9 +770,9 @@ async def process_voice_task(message: Message) -> None:
         thread_id = message.message_thread_id
         project = await get_project_by_thread(thread_id)
         if project:
-            proj_name, proj_path, _ = project
+            proj_name, proj_path, _, conv_id = project
             progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта <b>{proj_name}</b>...", parse_mode="HTML")
-            result = await run_agy_prompt(proj_path, transcription)
+            result = await run_agy_prompt(proj_path, transcription, conv_id)
             if len(result) > 4000:
                 for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
                     await message.reply(chunk)
@@ -722,7 +795,7 @@ async def process_document(message: Message) -> None:
     if not project:
         return
         
-    proj_name, proj_path, _ = project
+    proj_name, proj_path, _, _ = project
     doc = message.document
     filename = doc.file_name or f"file_{doc.file_id}"
     
@@ -750,7 +823,7 @@ async def process_photo(message: Message) -> None:
     if not project:
         return
         
-    proj_name, proj_path, _ = project
+    proj_name, proj_path, _, _ = project
     photo = message.photo[-1]
     filename = f"photo_{photo.file_id}.jpg"
     
@@ -786,10 +859,10 @@ async def process_text_message(message: Message) -> None:
     if not project:
         return
         
-    proj_name, proj_path, _ = project
+    proj_name, proj_path, _, conv_id = project
     progress_msg = await message.reply(f"⏳ Выполняю запрос в Antigravity для проекта <b>{proj_name}</b>...", parse_mode="HTML")
     
-    result = await run_agy_prompt(proj_path, message.text)
+    result = await run_agy_prompt(proj_path, message.text, conv_id)
     
     if len(result) > 4000:
         for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
